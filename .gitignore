@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data
+data/*.csv
+data/*.xlsx
+data/*.parquet
+data/*.zip
+
+# Model artifacts
+models/*.pkl
+models/*.joblib
+models/*.bin
+
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build
+build/
+dist/
+*.egg-info/
