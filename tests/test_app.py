@@ -47,6 +47,17 @@ def test_app_loads_without_a_trained_model(tmp_path, monkeypatch):
     assert any('train' in w.value.lower() for w in at.warning)
 
 
+def test_app_handles_incompatible_model_artifacts_gracefully(tmp_path, monkeypatch):
+    bad_model = tmp_path / 'bad.joblib'
+    bad_model.write_text('not a real model artifact')
+    monkeypatch.setattr(config, 'MODEL_PATH', bad_model)
+
+    at = AppTest.from_file(str(APP_PATH), default_timeout=60).run()
+    assert not at.exception
+    assert any('incompatible' in w.value.lower() or 'unreadable' in w.value.lower() for w in at.warning)
+    assert any('src.train' in i.value for i in at.info)
+
+
 def test_app_predicts_for_a_first_time_contact(trained_artifacts):
     at = AppTest.from_file(str(APP_PATH), default_timeout=60).run()
     assert not at.exception
@@ -56,6 +67,17 @@ def test_app_predicts_for_a_first_time_contact(trained_artifacts):
     assert len(at.metric) == 1
     probability = float(at.metric[0].value.rstrip('%'))
     assert 0.0 <= probability <= 100.0
+
+
+def test_app_presents_prediction_summary_and_disclaimer(trained_artifacts):
+    at = AppTest.from_file(str(APP_PATH), default_timeout=60).run()
+    at.button[0].click().run()
+
+    assert not at.exception
+    assert any('subscription probability' in md.value.lower() for md in at.markdown)
+    assert any('predicted class' in md.value.lower() for md in at.markdown)
+    assert any('priority' in md.value.lower() for md in at.markdown)
+    assert any('prediction' in c.value.lower() and 'not guaranteed' in c.value.lower() for c in at.caption)
 
 
 def test_app_predicts_for_a_previously_contacted_customer(trained_artifacts):

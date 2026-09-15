@@ -10,6 +10,28 @@ import pandas as pd
 from src.config import DEFAULT_THRESHOLD, FEATURE_COLUMNS, MODEL_PATH, SCHEMA_PATH
 
 
+def _describe_model_load_failure(path: str | Path, exc: Exception) -> str:
+    """Return a human-readable explanation for stale or broken model artifacts."""
+    model_path = Path(path)
+    message = str(exc).lower()
+    if 'sklearn' in message or 'pickle' in message or '_remaindercolslist' in message:
+        return (
+            f'Stale or incompatible model artifact detected at {model_path}. The model was '
+            'trained with a different scikit-learn version than the one currently installed. '
+            'Rebuild it with `python -m src.train`.'
+        )
+    return (
+        f'The saved model at {model_path} is unreadable or incompatible with the current '
+        'Python/scikit-learn environment. Re-train it with `python -m src.train`.'
+    )
+
+
+def _validate_loaded_model(model) -> None:
+    """Reject obviously invalid artifacts before the app ever uses them."""
+    if model is None or not hasattr(model, 'predict_proba'):
+        raise TypeError('The saved model does not look like a valid trained sklearn pipeline.')
+
+
 def load_model(path: str | Path = MODEL_PATH):
     """Load the saved pipeline, with a message that says how to create one if it's missing."""
     model_path = Path(path)
@@ -17,7 +39,20 @@ def load_model(path: str | Path = MODEL_PATH):
         raise FileNotFoundError(
             f'No trained model at {model_path}. Run `python -m src.train` to create one.'
         )
-    return joblib.load(model_path)
+    try:
+        model = joblib.load(model_path)
+    except Exception as exc:
+        raise ValueError(_describe_model_load_failure(model_path, exc)) from exc
+
+    try:
+        _validate_loaded_model(model)
+    except TypeError as exc:
+        raise ValueError(
+            f'The saved model at {model_path} is stale or not a valid trained pipeline. '
+            'Rebuild it with `python -m src.train`.'
+        ) from exc
+
+    return model
 
 
 def load_schema(path: str | Path = SCHEMA_PATH) -> dict | None:
