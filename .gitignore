@@ -16,10 +16,11 @@ data/*.xlsx
 data/*.parquet
 data/*.zip
 
-# Model artifacts
+# Model artifacts (regenerate with `python -m src.train`; see models/README.md)
 models/*.pkl
 models/*.joblib
 models/*.bin
+models/*.json
 
 # OS files
 .DS_Store

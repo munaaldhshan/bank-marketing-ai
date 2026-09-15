@@ -1,4 +1,4 @@
-"""Comparison utilities for candidate bank-marketing models."""
+"""Compare candidate models with cross-validation and pick a decision threshold."""
 
 from __future__ import annotations
 
@@ -6,67 +6,23 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
 
-from src.data_loader import load_bank_data
-from src.preprocessing import clean_dataset
-
-
-def _make_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
-    """Create the default preprocessing transformer for numeric and categorical columns."""
-    numeric_cols = [col for col in X.columns if pd.api.types.is_numeric_dtype(X[col])]
-    categorical_cols = [col for col in X.columns if col not in numeric_cols]
-
-    transformers: list[tuple[str, object, list[str]]] = []
-
-    if numeric_cols:
-        transformers.append(
-            (
-                'num',
-                Pipeline([
-                    ('imputer', SimpleImputer(strategy='median')),
-                    ('scaler', StandardScaler()),
-                ]),
-                numeric_cols,
-            )
-        )
-
-    if categorical_cols:
-        transformers.append(
-            (
-                'cat',
-                Pipeline([
-                    ('imputer', SimpleImputer(strategy='most_frequent')),
-                    ('encoder', OneHotEncoder(handle_unknown='ignore')),
-                ]),
-                categorical_cols,
-            )
-        )
-
-    return ColumnTransformer(transformers=transformers, remainder='drop')
+from src.config import CV_FOLDS, RANDOM_STATE, TEST_SIZE
+from src.modeling import build_pipeline, candidate_models
+from src.preprocessing import split_features_target
 
 
-def _binary_target(series: pd.Series) -> pd.Series:
-    mapped = series.astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})
-    if mapped.isna().any():
-        raise ValueError('Target column contains values other than yes/no.')
-    return mapped.astype(int)
-
-
-def prepare_comparison_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    """Return cleaned feature matrix and numeric target for model comparison."""
-    cleaned = clean_dataset(df)
-    X = cleaned.drop(columns=['y'])
-    y = _binary_target(cleaned['y'])
-    return X, y
-
-
-def _compute_metrics(y_true: pd.Series, y_prob: np.ndarray, threshold: float = 0.5) -> dict[str, float]:
+def compute_metrics(y_true: pd.Series, y_prob: np.ndarray, threshold: float = 0.5) -> dict[str, float]:
+    """Threshold-based and threshold-free metrics for one set of predictions."""
     y_pred = (y_prob >= threshold).astype(int)
     return {
         'accuracy': accuracy_score(y_true, y_pred),
@@ -74,73 +30,61 @@ def _compute_metrics(y_true: pd.Series, y_prob: np.ndarray, threshold: float = 0
         'recall': recall_score(y_true, y_pred, zero_division=0),
         'f1': f1_score(y_true, y_pred, zero_division=0),
         'roc_auc': roc_auc_score(y_true, y_prob),
+        'average_precision': average_precision_score(y_true, y_prob),
     }
 
 
 def compare_models(
     df: pd.DataFrame,
     models: dict[str, Any] | None = None,
-    test_size: float = 0.2,
-    random_state: int = 42,
+    test_size: float = TEST_SIZE,
+    random_state: int = RANDOM_STATE,
+    cv_folds: int = CV_FOLDS,
 ) -> dict[str, dict[str, float]]:
-    """Train and compare a set of candidate models on the cleaned bank marketing dataset."""
-    if models is None or len(models) == 0:
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.tree import DecisionTreeClassifier
+    """Cross-validate each candidate on the training split, then score once on the held-out test split.
 
-        models = {
-            'logistic_regression': LogisticRegression(max_iter=2000, class_weight='balanced'),
-            'decision_tree': DecisionTreeClassifier(max_depth=6, random_state=random_state),
-            'random_forest': RandomForestClassifier(
-                n_estimators=200,
-                random_state=random_state,
-                class_weight='balanced',
-                min_samples_leaf=5,
-            ),
-        }
-
-    X, y = prepare_comparison_data(df)
+    Reports both so overfitting is visible: a model whose CV score is much
+    higher than its test score is fitting noise in the training folds.
+    """
+    models = models if models else candidate_models(random_state)
+    X, y = split_features_target(df)
     X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=y,
+        X, y, test_size=test_size, random_state=random_state, stratify=y,
     )
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
     results: dict[str, dict[str, float]] = {}
     for name, estimator in models.items():
-        model = Pipeline([
-            ('preprocessor', _make_preprocessor(X_train)),
-            ('classifier', estimator),
-        ])
-        model.fit(X_train, y_train)
-        probs = model.predict_proba(X_test)[:, 1]
-        results[name] = _compute_metrics(y_test, probs)
-
+        pipeline = build_pipeline(estimator, X_train)
+        cv_scores = cross_validate(
+            pipeline, X_train, y_train, cv=cv,
+            scoring={'roc_auc': 'roc_auc', 'average_precision': 'average_precision'},
+        )
+        pipeline.fit(X_train, y_train)
+        probs = pipeline.predict_proba(X_test)[:, 1]
+        metrics = compute_metrics(y_test, probs)
+        metrics['cv_roc_auc_mean'] = cv_scores['test_roc_auc'].mean()
+        metrics['cv_roc_auc_std'] = cv_scores['test_roc_auc'].std()
+        metrics['cv_average_precision_mean'] = cv_scores['test_average_precision'].mean()
+        results[name] = metrics
     return results
 
 
 def optimize_threshold(
-    model: Pipeline,
-    X_test: pd.DataFrame,
-    y_test: pd.Series,
-    thresholds: list[float] | None = None,
+    y_true: pd.Series,
+    y_prob: np.ndarray,
+    thresholds: np.ndarray | None = None,
 ) -> tuple[float, dict[str, float]]:
-    """Select the threshold maximizing F1-score over the candidate thresholds."""
-    if thresholds is None:
-        thresholds = np.linspace(0.1, 0.9, 81)
+    """Sweep thresholds and return the one maximizing F1, with its full metrics.
 
-    best_threshold = thresholds[0]
-    best_metrics = {'f1': -1.0}
-
-    probs = model.predict_proba(X_test)[:, 1]
+    Callers must pass validation predictions, never the final test set —
+    picking a threshold on the test set and then reporting test metrics at
+    that threshold overstates performance (notebook 04's original bug).
+    """
+    thresholds = np.linspace(0.05, 0.95, 91) if thresholds is None else thresholds
+    best_threshold, best_metrics = thresholds[0], {'f1': -1.0}
     for threshold in thresholds:
-        metrics = _compute_metrics(y_test, probs, threshold=threshold)
+        metrics = compute_metrics(y_true, y_prob, threshold=threshold)
         if metrics['f1'] > best_metrics['f1']:
-            best_threshold = threshold
-            best_metrics = metrics
-            best_metrics['threshold'] = threshold
-
+            best_threshold, best_metrics = threshold, {**metrics, 'threshold': threshold}
     return best_threshold, best_metrics
