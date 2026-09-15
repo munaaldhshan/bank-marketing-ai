@@ -1,0 +1,21 @@
+{
+  "decision_threshold": 0.24999999999999994,
+  "priority_high_cutoff": 0.3137536003915878,
+  "priority_medium_cutoff": 0.0753531797150722,
+  "test_metrics": {
+    "accuracy": 0.8831957260806217,
+    "precision": 0.4844890510948905,
+    "recall": 0.572198275862069,
+    "f1": 0.5247035573122529,
+    "roc_auc": 0.8133317821282298,
+    "average_precision": 0.4920121239987921
+  },
+  "test_metrics_at_0.5": {
+    "accuracy": 0.9005585235551239,
+    "precision": 0.6518105849582173,
+    "recall": 0.2521551724137931,
+    "f1": 0.36363636363636365,
+    "roc_auc": 0.8133317821282298,
+    "average_precision": 0.4920121239987921
+  }
+}

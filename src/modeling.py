@@ -1,111 +1,39 @@
-"""Modeling utilities for the bank marketing project."""
+"""Candidate models and the pipeline factory shared by training, notebooks and tests."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import joblib
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
+from sklearn.base import BaseEstimator
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.tree import DecisionTreeClassifier
 
-from src.data_loader import load_bank_data
-from src.preprocessing import clean_dataset
-
-TARGET_COLUMN = 'y'
+from src.config import RANDOM_STATE
+from src.preprocessing import build_preprocessor
 
 
-def map_target_to_binary(y: pd.Series) -> pd.Series:
-    """Map the original yes/no labels to binary 1/0 values."""
-    mapped = y.astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})
-    if mapped.isna().any():
-        unknown = mapped.isna().sum()
-        raise ValueError(f'Unexpected target values found: {unknown} non-binary labels were present.')
-    return mapped.astype(int)
+def candidate_models(random_state: int = RANDOM_STATE) -> dict[str, BaseEstimator]:
+    """Fresh, unfitted instances of every model compared during training.
+
+    None of them use class weighting. With an 11% positive rate, re-weighting
+    barely changes ranking quality but inflates predicted probabilities
+    (balanced logistic regression averages 0.39 against a 0.11 base rate),
+    and the app shows those probabilities to people.
+    """
+    return {
+        'logistic_regression': LogisticRegression(max_iter=3000),
+        'decision_tree': DecisionTreeClassifier(max_depth=6, random_state=random_state),
+        'random_forest': RandomForestClassifier(
+            n_estimators=300, min_samples_leaf=5, n_jobs=-1, random_state=random_state,
+        ),
+        'gradient_boosting': HistGradientBoostingClassifier(
+            learning_rate=0.05, max_iter=400, early_stopping=True, validation_fraction=0.1,
+            n_iter_no_change=30, random_state=random_state,
+        ),
+    }
 
 
-def prepare_model_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    """Return feature matrix and binary target while excluding the leakage feature."""
-    cleaned = clean_dataset(df)
-    X = cleaned.drop(columns=[TARGET_COLUMN])
-    y = map_target_to_binary(cleaned[TARGET_COLUMN])
-    return X, y
-
-
-def build_model_pipeline(X: pd.DataFrame) -> Pipeline:
-    """Create a production-style preprocessing + logistic regression pipeline."""
-    numeric_cols = [
-        col for col in X.columns if pd.api.types.is_numeric_dtype(X[col])
-    ]
-    categorical_cols = [
-        col for col in X.columns if col not in numeric_cols
-    ]
-
-    transformers: list[tuple[str, object, list[str]]] = []
-
-    if numeric_cols:
-        numeric_pipeline = Pipeline(
-            steps=[
-                ('imputer', SimpleImputer(strategy='median')),
-                ('scaler', StandardScaler()),
-            ]
-        )
-        transformers.append(('num', numeric_pipeline, numeric_cols))
-
-    if categorical_cols:
-        categorical_pipeline = Pipeline(
-            steps=[
-                ('imputer', SimpleImputer(strategy='most_frequent')),
-                ('encoder', OneHotEncoder(handle_unknown='ignore')),
-            ]
-        )
-        transformers.append(('cat', categorical_pipeline, categorical_cols))
-
-    preprocessor = ColumnTransformer(transformers=transformers, remainder='drop')
-
-    model = Pipeline(
-        steps=[
-            ('preprocessor', preprocessor),
-            ('classifier', LogisticRegression(max_iter=2000, class_weight='balanced')),
-        ]
-    )
-    return model
-
-
-def train_baseline_model(
-    df: pd.DataFrame,
-    output_path: str | Path | None = None,
-    test_size: float = 0.2,
-    random_state: int = 42,
-) -> tuple[Pipeline, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """Train a baseline logistic regression model and optionally persist it."""
-    X, y = prepare_model_data(df)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=y,
-    )
-
-    model = build_model_pipeline(X_train)
-    model.fit(X_train, y_train)
-
-    if output_path is not None:
-        destination = Path(output_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(model, destination)
-
-    return model, X_train, X_test, y_train, y_test
-
-
-def load_and_train_default_model(data_path: str | Path | None = None) -> tuple[Pipeline, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """Load the project dataset and train the baseline model with default settings."""
-    path = Path(data_path) if data_path is not None else Path('data/bank_marketing.csv')
-    df = load_bank_data(path)
-    return train_baseline_model(df, output_path='models/final_model.joblib')
+def build_pipeline(estimator: BaseEstimator, X: pd.DataFrame) -> Pipeline:
+    """Wrap an estimator with the shared preprocessing so it accepts raw rows."""
+    return Pipeline([('preprocessor', build_preprocessor(X)), ('classifier', estimator)])
