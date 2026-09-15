@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import joblib
@@ -10,7 +11,7 @@ import pandas as pd
 from src.config import DEFAULT_THRESHOLD, FEATURE_COLUMNS, MODEL_PATH, SCHEMA_PATH
 
 
-def _describe_model_load_failure(path: str | Path, exc: Exception) -> str:
+def _describe_model_load_failure(path: str | Path, exc: Exception | str | None = None) -> str:
     """Return a human-readable explanation for stale or broken model artifacts."""
     model_path = Path(path)
     message = str(exc).lower()
@@ -32,27 +33,46 @@ def _validate_loaded_model(model) -> None:
         raise TypeError('The saved model does not look like a valid trained sklearn pipeline.')
 
 
-def load_model(path: str | Path = MODEL_PATH):
-    """Load the saved pipeline, with a message that says how to create one if it's missing."""
+def check_model_compatibility(path: str | Path = MODEL_PATH) -> tuple[bool, str]:
+    """Return whether a saved model is compatible with the current environment."""
     model_path = Path(path)
     if not model_path.exists():
-        raise FileNotFoundError(
-            f'No trained model at {model_path}. Run `python -m src.train` to create one.'
-        )
+        return False, f'No trained model at {model_path}. Run `python -m src.train` to create one.'
+
     try:
-        model = joblib.load(model_path)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            model = joblib.load(model_path)
     except Exception as exc:
-        raise ValueError(_describe_model_load_failure(model_path, exc)) from exc
+        return False, _describe_model_load_failure(model_path, exc)
+
+    warnings_text = ' '.join(str(w.message).lower() for w in caught)
+    if (
+        'inconsistentversionwarning' in warnings_text
+        or 'pickle' in warnings_text
+        or '_remaindercolslist' in warnings_text
+        or 'sklearn' in warnings_text
+    ):
+        return False, _describe_model_load_failure(model_path, 'incompatible sklearn pickle')
 
     try:
         _validate_loaded_model(model)
-    except TypeError as exc:
-        raise ValueError(
+    except TypeError:
+        return False, (
             f'The saved model at {model_path} is stale or not a valid trained pipeline. '
             'Rebuild it with `python -m src.train`.'
-        ) from exc
+        )
 
-    return model
+    return True, f'Model artifact at {model_path} is compatible with the current environment.'
+
+
+def load_model(path: str | Path = MODEL_PATH):
+    """Load the saved pipeline, with a message that says how to create one if it's missing."""
+    model_path = Path(path)
+    ok, message = check_model_compatibility(model_path)
+    if not ok:
+        raise ValueError(message)
+    return joblib.load(model_path)
 
 
 def load_schema(path: str | Path = SCHEMA_PATH) -> dict | None:

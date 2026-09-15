@@ -10,6 +10,7 @@ from streamlit.testing.v1 import AppTest
 
 import src.config as config
 from src.final_pipeline import train_and_save_final_pipeline
+from src.predict import check_model_compatibility
 
 APP_PATH = Path(__file__).resolve().parents[1] / 'app' / 'app.py'
 
@@ -56,6 +57,15 @@ def test_app_handles_incompatible_model_artifacts_gracefully(tmp_path, monkeypat
     assert not at.exception
     assert any('incompatible' in w.value.lower() or 'unreadable' in w.value.lower() for w in at.warning)
     assert any('src.train' in i.value for i in at.info)
+
+
+def test_check_model_compatibility_flags_invalid_artifacts(tmp_path):
+    bad_model = tmp_path / 'bad.joblib'
+    bad_model.write_text('not a real model artifact')
+
+    compatible, message = check_model_compatibility(bad_model)
+    assert not compatible
+    assert 'src.train' in message
 
 
 def test_app_predicts_for_a_first_time_contact(trained_artifacts):

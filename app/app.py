@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import ECONOMIC_SNAPSHOTS_PATH, METRICS_PATH, MODEL_PATH, PDAYS_NEVER_CONTACTED, SCHEMA_PATH
-from src.predict import load_model, load_schema, predict_customer
+from src.predict import check_model_compatibility, load_model, load_schema, predict_customer
 
 st.set_page_config(page_title='Bank Marketing Response Prediction', page_icon='🏦')
 
@@ -75,6 +75,12 @@ if schema is None:
         'The saved model has no feature_schema.json next to it, so this app cannot show valid '
         'options or catch out-of-range inputs. Re-run `python -m src.train` to regenerate both.'
     )
+    st.stop()
+
+compatible, compatibility_message = check_model_compatibility(MODEL_PATH)
+if not compatible:
+    st.warning(compatibility_message)
+    st.info('The forecast form is disabled until the model artifact is refreshed with `python -m src.train`.')
     st.stop()
 
 cats = schema['categorical']
