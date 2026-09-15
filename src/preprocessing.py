@@ -1,69 +1,69 @@
-"""Preprocessing utilities for the bank marketing project."""
+"""Cleaning, target encoding and the one preprocessing definition every model uses."""
 
 from __future__ import annotations
 
-from typing import Iterable
-
-import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-
-TARGET_COLUMN = 'y'
-
-
-def identify_feature_types(df: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """Separate numerical and categorical features while excluding the target."""
-    target_cols = {TARGET_COLUMN}
-    feature_cols = [col for col in df.columns if col not in target_cols]
-    numeric_cols = [
-        col for col in feature_cols if pd.api.types.is_numeric_dtype(df[col]) and col != 'duration'
-    ]
-    categorical_cols = [
-        col for col in feature_cols if col not in numeric_cols and col != 'duration'
-    ]
-    return numeric_cols, categorical_cols
+from src.config import LEAKAGE_COLUMNS, TARGET
 
 
-def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
-    """Create a preprocessing pipeline for numeric and categorical variables."""
-    numeric_cols, categorical_cols = identify_feature_types(X)
+def clean_dataset(df: pd.DataFrame, drop_leakage: bool = True) -> pd.DataFrame:
+    """Remove exact duplicate records, then (by default) the leakage columns.
 
-    transformers = []
-    if numeric_cols:
-        transformers.append(
-            ('num', Pipeline([('scaler', StandardScaler())]), numeric_cols)
-        )
-    if categorical_cols:
-        transformers.append(
-            ('cat', OneHotEncoder(handle_unknown='ignore', drop=None), categorical_cols)
-        )
-
-    return ColumnTransformer(transformers=transformers, remainder='drop')
-
-
-def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply basic cleaning and return a dataset ready for train/test splitting."""
-    cleaned = df.copy()
-
-    if 'duration' in cleaned.columns:
-        cleaned = cleaned.drop(columns=['duration'])
-
-    if cleaned.duplicated().any():
-        cleaned = cleaned.drop_duplicates().reset_index(drop=True)
-
-    for col in cleaned.columns:
-        if cleaned[col].dtype == 'object':
-            cleaned[col] = cleaned[col].replace({'unknown': np.nan, 'Unknown': np.nan, 'nan': np.nan})
-
+    Duplicates are checked on the full record *before* `duration` is dropped;
+    doing it afterwards merges ~1,800 distinct customers who only differ in
+    call length. 'unknown' stays a category of its own on purpose: it carries
+    signal (default='unknown' converts at 5% vs 13% for 'no'), and keeping it
+    means cleaning behaves identically on pandas 2 and pandas 3.
+    """
+    cleaned = df.drop_duplicates().reset_index(drop=True)
+    if drop_leakage:
+        cleaned = cleaned.drop(columns=[col for col in LEAKAGE_COLUMNS if col in cleaned.columns])
     return cleaned
 
 
-def prepare_features_and_target(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    """Split the cleaned dataset into features and target."""
-    cleaned = clean_dataset(df)
-    X = cleaned.drop(columns=[TARGET_COLUMN])
-    y = cleaned[TARGET_COLUMN].copy()
-    return X, y
+def encode_target(y: pd.Series) -> pd.Series:
+    """Map yes/no labels to 1/0, failing loudly on anything else."""
+    mapped = y.astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})
+    if mapped.isna().any():
+        unexpected = sorted(y[mapped.isna()].astype(str).unique())
+        raise ValueError(f'Unexpected target values: {unexpected}')
+    return mapped.astype(int).rename(TARGET)
+
+
+def split_features_target(df: pd.DataFrame, drop_leakage: bool = True) -> tuple[pd.DataFrame, pd.Series]:
+    """Clean the raw frame and return (X, y) with y encoded as 0/1."""
+    cleaned = clean_dataset(df, drop_leakage=drop_leakage)
+    return cleaned.drop(columns=[TARGET]), encode_target(cleaned[TARGET])
+
+
+def identify_feature_types(X: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """Split the feature columns into numeric and categorical lists."""
+    features = [col for col in X.columns if col != TARGET]
+    numeric = [col for col in features if pd.api.types.is_numeric_dtype(X[col])]
+    categorical = [col for col in features if col not in numeric]
+    return numeric, categorical
+
+
+def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
+    """Median-impute and scale numbers; mode-impute and one-hot encode categories.
+
+    Living inside the saved pipeline, these steps run identically at training
+    and prediction time. Unseen categories are encoded as all zeros, which is
+    why the app validates inputs against the training schema first.
+    """
+    numeric, categorical = identify_feature_types(X)
+    numeric_steps = Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())])
+    categorical_steps = Pipeline([
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        # Dense output so that HistGradientBoosting can consume it.
+        ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False)),
+    ])
+    return ColumnTransformer(
+        [('num', numeric_steps, numeric), ('cat', categorical_steps, categorical)],
+        remainder='drop',
+    )
